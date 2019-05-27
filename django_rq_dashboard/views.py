@@ -5,15 +5,25 @@ from itertools import groupby
 
 from django.contrib import messages
 from django.conf import settings
-from django.core.urlresolvers import reverse
+
+try:
+    from django.core.urlresolvers import reverse
+except:
+    from django.urls import reverse
+
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect
 from django.utils import timezone
-from django.utils.six.moves.urllib.parse import urlencode
+
+try:
+    from django.utils.six.moves.urllib.parse import urlencode
+except:
+    from django.utils.http import urlencode
+
 from django.utils.translation import ugettext_lazy as _, ugettext as __
 from django.views import generic
 
-from rq import Queue, Worker, get_failed_queue, push_connection
+from rq import Queue, Worker, push_connection
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
@@ -24,7 +34,6 @@ except ImportError:
     Scheduler = None
 
 from .forms import QueueForm, JobForm
-
 
 utc = pytz.timezone('UTC')
 
@@ -53,11 +62,19 @@ def serialize_queue(queue):
     )
 
 
+def job_to_str(job):
+    template = '{id} {exc_info} <b>description:</b><br> {description} <b>created</b> {created_at}<br> ' \
+               '<b>enqueued</b> {enqueued_at}'
+    return template.format(**serialize_job(job))
+
+
 def serialize_worker(worker):
+    current_job = worker.get_current_job()
     return dict(
         name=worker.name,
         queues=[q.name for q in worker.queues],
         state=worker.get_state(),
+        job=job_to_str(current_job) if current_job else '',
         url=reverse('rq_worker', args=[worker.name]),
     )
 
@@ -76,9 +93,16 @@ def serialize_scheduled_queues(queue):
         **queue)
 
 
+def is_authenticated(user):
+    if callable(user.is_authenticated):
+        return user.is_authenticated()
+    return user.is_authenticated
+
+
 class SuperUserMixin(object):
+
     def dispatch(self, request, *args, **kwargs):
-        if not request.user.is_authenticated():
+        if not is_authenticated(request.user):
             return redirect('{}?{}'.format(reverse('admin:login'),
                                            urlencode({
                                                'next': reverse('rq_stats')
@@ -93,6 +117,7 @@ class SuperUserMixin(object):
         push_connection(self.connection)
 
         return super(SuperUserMixin, self).dispatch(request, *args, **kwargs)
+
 
 def by_name(obj):
     return obj.name
@@ -134,6 +159,8 @@ class Stats(SuperUserMixin, generic.TemplateView):
             )
         return super(Stats, self).render_to_response(context,
                                                      **response_kwargs)
+
+
 stats = Stats.as_view()
 
 
@@ -171,6 +198,8 @@ class QueueDetails(SuperUserMixin, generic.FormView):
         }
         messages.success(self.request, msgs[form.cleaned_data])
         return super(QueueDetails, self).form_valid(form)
+
+
 queue = QueueDetails.as_view()
 
 
@@ -191,7 +220,7 @@ class JobDetails(SuperUserMixin, generic.FormView):
         except NoSuchJobError:
             raise Http404
         if job.is_failed:
-            queue = get_failed_queue(connection=self.connection)
+            queue = '-'
         else:
             queue = Queue(job.origin, connection=self.connection)
         ctx.update({
@@ -211,6 +240,8 @@ class JobDetails(SuperUserMixin, generic.FormView):
         }
         messages.success(self.request, msgs[form.cleaned_data])
         return redirect(reverse('rq_queue', args=[queue]))
+
+
 job = JobDetails.as_view()
 
 
@@ -227,6 +258,8 @@ class WorkerDetails(SuperUserMixin, generic.TemplateView):
             'title': _('Worker %s') % worker.name,
         })
         return ctx
+
+
 worker = WorkerDetails.as_view()
 
 
@@ -244,6 +277,7 @@ class SchedulerDetails(SuperUserMixin, generic.TemplateView):
         def cond(job_tuple):
             job, next_run = job_tuple
             return job.origin == queue.name
+
         jobs = filter(cond, scheduler.get_jobs(with_times=True))
 
         ctx.update({
@@ -254,5 +288,6 @@ class SchedulerDetails(SuperUserMixin, generic.TemplateView):
             'title': "Jobs scheduled on '%s' queue" % queue.name,
         })
         return ctx
+
 
 scheduler = SchedulerDetails.as_view()
